@@ -1,10 +1,12 @@
 package log
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,13 +40,37 @@ type Log struct {
 
 // JsonLog is a logger that formats log messages as JSON
 type JsonLog struct {
-	saw *Saw
+	saw     *Saw
+	encoder *json.Encoder
+	buffer  *bytes.Buffer
+}
+
+// builderPool is a sync.Pool for reusing strings.Builder instances
+var builderPool = sync.Pool{
+	New: func() interface{} {
+		return &strings.Builder{}
+	},
+}
+
+// logPool is a sync.Pool for reusing Log instances
+var logPool = sync.Pool{
+	New: func() interface{} {
+		return &Log{}
+	},
 }
 
 // Initialize creates and returns a new Saw instance with initialized headContext
 func Initialize() *Saw {
 	saw := &Saw{}
-	saw.JSON = &JsonLog{saw: saw}
+	buffer := &bytes.Buffer{}
+	jsonLog := &JsonLog{
+		saw:     saw,
+		encoder: json.NewEncoder(buffer),
+		buffer:  buffer,
+	}
+
+	jsonLog.encoder.SetEscapeHTML(false)
+	saw.JSON = jsonLog
 
 	return saw
 }
@@ -57,13 +83,14 @@ func (s *Saw) SetConfig(config SawConfig) *Saw {
 
 // newLog creates a new log message with the specified level and message
 func (s *Saw) newLog(level string, msg string) {
-	body := Log{
-		Lvl:  level,
-		Msg:  msg,
-		Time: time.Now().Unix(),
-	}
+	log := logPool.Get().(*Log)
+	defer logPool.Put(log)
 
-	s.printLog(body)
+	log.Lvl = level
+	log.Msg = msg
+	log.Time = time.Now().Unix()
+
+	s.printLog(*log)
 }
 
 // printLog formats and prints the log message to the console
@@ -89,7 +116,12 @@ func (s *Saw) printLog(log Log) {
 		}
 	}
 
-	var sb strings.Builder
+	sb := builderPool.Get().(*strings.Builder)
+	defer func() {
+		sb.Reset()
+		builderPool.Put(sb)
+	}()
+
 	sb.WriteString(fmt.Sprintf("%s----------------------------------------------------------------%s\n", color, colorReset))
 	sb.WriteString(fmt.Sprintf("%sLog level: %s%s\n", color, log.Lvl, colorReset))
 	sb.WriteString(fmt.Sprintf("%sLog message: %s%s\n", color, log.Msg, colorReset))
@@ -140,18 +172,23 @@ func (s *Saw) Panic(msg string) {
 
 // newJSONLog creates a new JSON formatted log message
 func (j *JsonLog) newJSONLog(level string, msg string) []byte {
-	log := Log{
-		Lvl:  level,
-		Msg:  msg,
-		Time: time.Now().Unix(),
-	}
+	j.buffer.Reset()
 
-	body, err := json.Marshal(log)
+	log := logPool.Get().(*Log)
+	defer logPool.Put(log)
+
+	log.Lvl = level
+	log.Msg = msg
+	log.Time = time.Now().Unix()
+
+	err := j.encoder.Encode(log)
 	if err != nil {
-		return fmt.Append(body, "{\"error\": \"failed to marshal log\"}")
+		j.buffer.Reset()
+		j.buffer.WriteString(fmt.Sprintf("{\"error\":\"%s\"}", err.Error()))
+		return j.buffer.Bytes()
 	}
 
-	return body
+	return j.buffer.Bytes()
 }
 
 // Debug returns a JSON formatted debug level log message

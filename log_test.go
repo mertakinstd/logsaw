@@ -78,3 +78,10 @@ func TestLogLevels(t *testing.T) {
 	}()
 	saw.Panic("panic test")
 }
+
+func BenchmarkJsonLogOutput(b *testing.B) {
+	saw := Initialize()
+	for i := 0; i < b.N; i++ {
+		saw.JSON.Info("benchmark test message")
+	}
+}
